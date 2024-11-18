@@ -1,0 +1,435 @@
+# Análisis de desempleo ---------------------------------------------------
+
+#Aprendizaje Estadístico ( Daniela, Jonathan, Sofía)
+
+#install.packages(c("dplyr", "stargazer", "lmtest", "car", "pROC", "ResourceSelection", "tseries", "sandwich"))
+library(dplyr)
+library(lmtest)
+library(stargazer)
+library(car)
+library(pROC)
+library(ResourceSelection)
+library(tseries)
+library(sandwich)
+
+# Data car ---------------------------------------------------------
+
+# Limpieza y carga de la data ---------------------------------------------
+
+# Cargar la base de datos ENEMDU
+dataset <- read.csv("enemdu_persona_2023_12.csv", sep=";")
+dataset$condact <-as.factor(dataset$condact)
+
+
+# Reemplazar 99 en p03 con NA
+
+table(dataset$condact )
+
+dataset$condact <- ifelse(dataset$condact == 0, NA, dataset$condact)
+
+table(dataset$condact )
+
+# Recodificar las variables con etiquetas descriptivas y crear edad al cuadrado
+dataset <- dataset %>%
+  mutate(
+    # Reemplazar 99 en p03 (edad) con NA
+        p03 = replace(p03, p03 == 99, NA),
+        experiencia = as.numeric(p45),         # Crear columna experiencia basada en p45
+        experiencia2 = experiencia^2, # Crear columna experiencia al cuadrado
+       
+      
+    # Recodificar las variables con etiquetas descriptivas y crear edad al cuadrado
+    etnia = factor(p15, levels = 1:8, labels = c("Indígena", "Afroecuatoriano/a Afrodescendiente", "Negro/a", "Mulato/a", "Montubio/a", "Mestizo/a", "Blanco/a", "Otro")),
+    educacion = factor(p10a, levels = 1:10, labels = c("Ninguno", "Centro de alfabetización", "Jardín de Infantes", "Primaria", "Educación Básica", "Educación Media / Bachillerato", "Secundaria", "Superior no Universitario", "Superior Universitario", "Post-grado")),
+    p06 = factor(p06, levels = 1:6, labels = c("Casado/a", "Separado/a", "Divorciado/a", "Viudo/a", "Unión Libre", "Soltero/a")),
+    # Condición de actividad (condact) SIN menores de 15
+    condact = factor(condact, levels = 2:10, labels = c("Empleo adecuado/pleno", "Subempleo por insuficiencia de tiempo", "Subempleo por insuficiencia de ingresos", "Otro empleo no pleno", "Empleo no remunerado", "Empleo no clasificado", "Desempleo abierto", "Desempleo oculto", "Población económicamente inactiva")),
+    area = factor(area, levels = 1:2, labels = c("Urbana", "Rural")),
+    edad_cuadrado = p03^2,
+    
+    sexo = case_when(
+      p02 == 1 ~ "Hombre",
+      p02 == 2 ~ "Mujer",
+      TRUE ~ NA_character_), # Cualquier otro valor será NA
+    
+    
+    educacion = case_when(
+      educacion %in% c("Ninguno", "Centro de alfabetización", "Jardín de Infantes", "Otro") ~ "Sin educación formal",
+      educacion %in% c("Primaria", "Educación Básica") ~ "Educación Primaria y Básica",
+      educacion %in% c( "Educación Media / Bachillerato", "Secundaria") ~ "Educación Media",
+      educacion %in% c("Superior no Universitario","Superior Universitario","Post-grado") ~ "Educación Superior",
+      TRUE ~ NA_character_ # Para valores no especificados
+    ),
+    
+    etnia = case_when(
+      etnia %in% c("Indígena", "Afroecuatoriano/a Afrodescendiente", "Negro/a", "Mulato/a", "Montubio/a", "Otro") ~ "Minorías",
+      etnia %in% c("Mestizo/a", "Blanco/a") ~ "Mestizo/Blanco",
+      TRUE ~ NA_character_  # Para valores no especificados
+    ),
+    
+    # Crear la variable combinada de pobreza
+    condicion_pobreza = case_when(
+      epobreza == 1 ~ "Extrema pobreza",   # Si está en extrema pobreza
+      pobreza == 1 ~ "Pobreza",            # Si está en pobreza pero no en extrema pobreza
+      TRUE ~ "No pobreza"                  # Si no está ni en pobreza ni en extrema pobreza
+    ),
+    
+    # Categorizar edad en rangos
+    rangoedad = case_when(
+      p03 >= 15 & p03 <= 24 ~ 1, # Entre 15 y 24 años
+      p03 >= 25 & p03 <= 34 ~ 2, # Entre 25 y 34 años
+      p03 >= 35 & p03 <= 44 ~ 3, # Entre 35 y 44 años
+      p03 >= 45 & p03 <= 54 ~ 4, # Entre 45 y 54 años
+      p03 >= 55 & p03 <= 64 ~ 5, # Entre 55 y 64 años
+      p03 >= 65 ~ 6, # Mayores de 65
+      TRUE ~ NA_real_ # Para edades fuera del rango esperado
+    ),
+    rangoedad = factor(rangoedad, levels = 1:6, labels = c("Entre 15 y 24 años", "Entre 25 y 34 años", "Entre 35 y 44 años", "Entre 45 y 54 años", "Entre 55 y 64 años", "Mayores de 65")),
+    
+    
+    # Categorizar estado civil
+    estado_civil = case_when(
+      p06 %in% c("Casado/a", "Unión Libre") ~ 1, # Casado/a o en unión libre
+      p06 == "Soltero/a" ~ 2,                   # Soltero/a
+      TRUE ~ 3                                  # Cualquier otro caso
+    ),
+    # Convertir estado civil a factor con etiquetas
+    estado_civil = factor(estado_civil, levels = 1:3, labels = c("Casado/a o en unión libre", "Soltero/a", "Cualquier otro caso")),
+
+        # Crear variable dummy de empleo (empleados = 1, desempleados = 0)
+    condact_dummy = case_when(
+          condact %in% c("Empleo adecuado/pleno", 
+                         "Subempleo por insuficiencia de tiempo", 
+                         "Subempleo por insuficiencia de ingresos", 
+                         "Otro empleo no pleno", 
+                         "Empleo no remunerado", 
+                         "Empleo no clasificado") ~ 0,  # Empleados
+          condact %in% c("Desempleo abierto", "Desempleo oculto", "Población económicamente inactiva") ~ 1,  # Desempleados
+          TRUE ~ NA_real_  # Para cualquier otro caso
+        ),
+
+    
+    # Recategorizar el sector de empleo (secemp)
+    secemp_recategorizado = case_when(
+      secemp == 1 ~ "Sector Formal",       # Sector Formal
+      secemp == 2 ~ "Sector Informal",     # Sector Informal
+      secemp == 3 ~ "Empleo Doméstico",    # Empleo Doméstico
+      secemp == 4 ~ "No Clasificados por Sector", # No Clasificados por Sector
+      TRUE ~ "No Especificado"             # Para valores no especificados
+    ),
+    
+    ingrl1 =ingrl,
+    ingreso_hogar = replace(ingrl, ingrl %in% c(-1, 999999), NA),
+    
+    # Ingreso del hogar (ingrl) recategorizado
+    ingreso_hogar = case_when(
+      ingrl <= 321 ~ "Bajo",               # Ingresos hasta 321
+      ingrl > 321 & ingrl <= 4012 ~ "Medio", # Ingresos entre 322 y 4012
+      ingrl > 4012 ~ "Alto",               # Ingresos superiores a 4012
+      TRUE ~ "No especificado"             # Para valores no especificados
+    )
+    
+  
+  # Reemplazar valores erróneos de ingresos (-1 y 999999) con NA
+# Eliminar los valores NA de las variables claves (p02, p03, p06, p10a, p15, condact, area, ingreso, etc.)
+)
+
+dataset <- dataset %>%
+  mutate(
+    sexo = as.factor(sexo),
+    rangoedad = as.factor(rangoedad),
+    estado_civil = as.factor(estado_civil),
+    educacion = as.factor(educacion),
+    etnia = as.factor(etnia),
+    area = as.factor(area),
+    condicion_pobreza = as.factor(condicion_pobreza),
+    secemp_recategorizado = as.factor(secemp_recategorizado),
+    ingreso_hogar = as.factor(ingreso_hogar),
+    condact_dummy = as.numeric(condact_dummy)
+  )
+summary(dataset)
+
+dataset <- dataset %>%
+  mutate(
+    # Establecer 'Sin educación formal' como referencia para 'educacion'
+    educacion = relevel(educacion, ref = "Sin educación formal"),
+    
+    # Establecer 'Mestizo/Blanco' como referencia para 'etnia'
+    etnia = relevel(etnia, ref = "Mestizo/Blanco"),
+    
+    # Establecer 'Urbana' como referencia para 'area'
+    area = relevel(area, ref = "Urbana"),
+    
+    # Establecer 'No pobreza' como referencia para 'condicion_pobreza'
+    condicion_pobreza = relevel(condicion_pobreza, ref = "No pobreza"),
+    
+    # Establecer 'Entre 15 y 24 años' como referencia para 'rangoedad'
+    rangoedad = relevel(rangoedad, ref = "Entre 15 y 24 años"),
+    
+    # Establecer 'Casado/a o en unión libre' como referencia para 'estado_civil'
+    estado_civil = relevel(estado_civil, ref = "Casado/a o en unión libre"),
+    
+    # Establecer 'Hombre' como referencia para 'sexo'
+    sexo = relevel(sexo, ref = "Hombre")
+  )
+
+covariate_labels = c(
+  "Mujer (Hombre)",                            # sexoMujer
+  "Entre 25 y 34 años (15-24 años)",           # rangoedadEntre 25 y 34 años
+  "Entre 35 y 44 años (15-24 años)",           # rangoedadEntre 35 y 44 años
+  "Entre 45 y 54 años (15-24 años)",           # rangoedadEntre 45 y 54 años
+  "Entre 55 y 64 años (15-24 años)",           # rangoedadEntre 55 y 64 años
+  "Mayores de 65 años (15-24 años)",           # rangoedadMayores de 65
+  "Soltero/a (Casado/a o en unión libre)",      # estado_civilSoltero/a
+  "Cualquier otro caso (Casado/a o en unión libre)", # estado_civilCualquier otro caso
+  "Educación Media (Sin educación formal)",     # educacionEducación Media
+  "Educación Primaria y Básica (Sin educación formal)", # educacionEducación Primaria y Básica
+  "Educación Superior (Sin educación formal)",  # educacionEducación Superior
+  "Minorías (Mestizo/Blanco)",                 # etniaMinorías
+  "Rural (Urbana)",                             # areaRural
+  "Extrema pobreza (No pobreza)",              # condicion_pobrezaExtrema pobreza
+  "Pobreza (No pobreza)"                        # condicion_pobrezaPobreza
+)
+# Crear un nuevo dataset limpio con las transformaciones aplicadas
+dataset <- dataset %>%
+  select(
+    condact,                  # Condición de actividad
+    sexo,                     # Sexo                   
+    educacion,                # Nivel educativo
+    estado_civil,             # Estado civil
+    area,                     # Área urbana/rural
+    p03,                      # Edad
+    edad_cuadrado,            # Edad al cuadrado
+    experiencia,              # Experiencia
+    experiencia2,             # Experiencia al cuadrado
+    etnia,     # Etnia recategorizada
+    condicion_pobreza,        # Condición de pobreza
+    rangoedad,                # Rango de edad
+    condact_dummy,            # Dummy de empleo
+    secemp_recategorizado,    # Sector de empleo recategorizado
+    ingreso_hogar,  # Ingreso del hogar recategorizado
+    ingrl1
+  )
+dataset <- dataset %>% filter(!is.na(condact_dummy))
+
+
+# Verifica el contenido del nuevo dataset
+summary(dataset)
+# Ver el dataset limpio con las variables transformadas
+#print(dataset)
+colnames(dataset)
+
+na.omit(dataset)
+# Modelo Logit ------------------------------------------------------------
+
+# Ajustar el modelo Logit
+
+Mod = glm(
+  condact_dummy ~ sexo + rangoedad + experiencia + experiencia2 + estado_civil + educacion + etnia
+  + area + ingreso_hogar+ secemp_recategorizado +condicion_pobreza,
+  data = dataset,
+  family = binomial(link = "logit")
+)
+summary(Mod)
+
+# Modelo Básico -----------------------------------------------------------
+
+
+Mod0 = glm(
+  condact_dummy ~ sexo +p03  + educacion +etnia + area,
+  data = dataset,
+  family = binomial(link = "logit")
+)
+# Resumen del modelo
+summary(Mod0)
+stargazer(Mod0, type="text",  covariate.labels = covariate_labels,
+          omit.stat = c("LL","ser","f"),
+          no.space = TRUE)
+
+#>1 más prob (Desempleo)
+#<1 menos prob
+#=1 no hay efecto
+
+# Odds Ratios
+odds_ratios <- exp(coef(Mod0))
+print((odds_ratios-1)*100)
+# Presentación con stargazer
+# Presentación con stargazer
+stargazer(Mod0, type = "text", report = "vcs*", ci = TRUE)
+
+# VALIDACION DE SUPUESTOS -------------------------------------------------
+
+
+# Multicolinealidad: Verificar VIF
+vif_values <- vif(Mod0)
+print(vif_values)
+
+# Bondad de Ajuste: Prueba de Hosmer-Lemeshow
+library(ResourceSelection)
+hl_test <- hoslem.test(dataset$condact_dummy, fitted(Mod0), g=10) #H0: El modelo logístico se ajusta bien a los datos observados
+print(hl_test) #El modelo logístico no se ajusta bien a los datos observados
+
+# Predicciones y matriz de Confusión --------------------------------------
+
+# Predicciones del modelo (probabilidades)
+predicciones <- predict(Mod0, type = "response")
+
+# Convertir probabilidades en clases binarias (umbral = 0.5)
+pred_clases <- ifelse(predicciones > 0.5, 1, 0)
+
+# Crear la matriz de confusión
+confusion_matrix <- table(Predicted = pred_clases, Actual = dataset$condact_dummy)
+print(confusion_matrix)
+# Métricas adicionales para interpretación
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
+#Capacidad Predictiva: Curva ROC y AUC
+roc_obj <- roc(dataset$condact_dummy, predicciones)
+auc_val <- auc(roc_obj)
+print(auc_val)
+plot(roc_obj, main = "Curva ROC del Modelo Logit")
+#capacidad aceptable a buena para diferenciar entre individuos empleados y desempleados. 0.79
+
+#TEst Breusch-Pagan (Ho: homocedasticidad)
+bptest(Mod0) #Heterocedasticos
+#Corregimos
+coeftest(Mod0, vcov = vcovHC(Mod0, type = "HC3")) 
+#"HC3": Ajuste de sesgo, más conservador
+#errores robustos
+
+# Modelo con más variables ------------------------------------------------
+
+
+Mod1 = glm(
+  condact_dummy ~ sexo +rangoedad + estado_civil + educacion +etnia + area + condicion_pobreza,
+  data = dataset,
+  family = binomial(link = "logit")
+)
+# Resumen del modelo
+summary(Mod1)
+stargazer(Mod1, type="text",  covariate.labels = covariate_labels,
+omit.stat = c("LL","ser","f"),
+no.space = TRUE)
+
+#>1 más prob (Desempleo)
+#<1 menos prob
+#=1 no hay efecto
+
+# Odds Ratios
+odds_ratios <- exp(coef(Mod1))
+print((odds_ratios-1)*100)
+# Presentación con stargazer
+stargazer(Mod1, type = "text", report = "vcs*", ci = TRUE)
+# VALIDACION DE SUPUESTOS -------------------------------------------------
+
+
+# Multicolinealidad: Verificar VIF
+vif_values <- vif(Mod1)
+print(vif_values)
+
+# Bondad de Ajuste: Prueba de Hosmer-Lemeshow
+library(ResourceSelection)
+hl_test <- hoslem.test(dataset$condact_dummy, fitted(Mod1), g=10) #H0: El modelo logístico se ajusta bien a los datos observados
+print(hl_test) #El modelo logístico no se ajusta bien a los datos observados
+
+# Predicciones y matriz de Confusión --------------------------------------
+
+# Predicciones del modelo (probabilidades)
+predicciones <- predict(Mod1, type = "response")
+
+# Convertir probabilidades en clases binarias (umbral = 0.5)
+pred_clases <- ifelse(predicciones > 0.5, 1, 0)
+
+# Crear la matriz de confusión
+confusion_matrix <- table(Predicted = pred_clases, Actual = dataset$condact_dummy)
+print(confusion_matrix)
+# Métricas adicionales para interpretación
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", round(accuracy, 4)))
+#Capacidad Predictiva: Curva ROC y AUC
+roc_obj <- roc(dataset$condact_dummy, predicciones)
+auc_val <- auc(roc_obj)
+print(auc_val)
+plot(roc_obj, main = "Curva ROC del Modelo Logit")
+#capacidad aceptable a buena para diferenciar entre individuos empleados y desempleados. 0.79
+
+#TEst Breusch-Pagan (Ho: homocedasticidad)
+bptest(Mod1) #Heterocedasticos
+#Corregimos
+coeftest(Mod1, vcov = vcovHC(Mod1, type = "HC3")) 
+#"HC3": Ajuste de sesgo, más conservador
+#errores robustos
+
+# Modelo con interacciones ------------------------------------------------
+
+
+Mod_int = glm(
+  condact_dummy ~ sexo*estado_civil + rangoedad + educacion +etnia*area,
+  data = dataset,
+  family = binomial(link = "logit")
+)
+
+# Resumen del modelo
+summary(Mod_int)
+
+#>1 más prob (Desempleo)
+#<1 menos prob
+#=1 no hay efecto
+
+# Odds Ratios
+odds_ratios <- exp(coef(Mod_int))
+print((odds_ratios-1)*100)
+# Presentación con stargazer
+stargazer(Mod_int, type = "text", report = "vcs*", ci = TRUE)
+# VALIDACION DE SUPUESTOS -------------------------------------------------
+
+
+# Multicolinealidad: Verificar VIF
+vif_values_int <- vif(Mod_int, type="predictor")
+print(vif_values_int)
+
+# Bondad de Ajuste: Prueba de Hosmer-Lemeshow
+library(ResourceSelection)
+hl_test_int <- hoslem.test(dataset$condact_dummy, fitted(Mod_int), g=10) #H0: El modelo logístico se ajusta bien a los datos observados
+print(hl_test_int) #El modelo logístico no se ajusta bien a los datos observados
+
+# Predicciones y matriz de Confusión --------------------------------------
+
+# Predicciones del modelo (probabilidades)
+predicciones_int <- predict(Mod_int, type = "response")
+
+# Convertir probabilidades en clases binarias (umbral = 0.5)
+pred_clases_int <- ifelse(predicciones_int > 0.5, 1, 0)
+
+# Crear la matriz de confusión
+confusion_matrix_int <- table(Predicted = pred_clases_int, Actual = dataset$condact_dummy)
+print(confusion_matrix_int)
+# Métricas adicionales para interpretación
+accuracy_int <- sum(diag(confusion_matrix_int)) / sum(confusion_matrix_int)
+print(paste("Accuracy:", round(accuracy_int, 4)))
+#Capacidad Predictiva: Curva ROC y AUC
+roc_obj_int <- roc(dataset$condact_dummy, predicciones_int)
+auc_val_int <- auc(roc_obj_int)
+print(auc_val_int)
+plot(roc_obj_int, main = "Curva ROC del Modelo Logit")
+#capacidad aceptable a buena para diferenciar entre individuos empleados y desempleados. 0.79
+
+#TEst Breusch-Pagan (Ho: homocedasticidad)
+bptest(Mod_int) #Heterocedasticos
+#Corregimos
+coeftest(Mod_int, vcov = vcovHC(Mod_int, type = "HC3")) 
+#"HC3": Ajuste de sesgo, más conservador
+#errores robustos
+
+# MODELOS -----------------------------------------------------------------
+modf = step(Mod1)
+
+# Modelos
+
+# Usar stargazer con errores robustos
+stargazer(Mod0, Mod1, 
+          type = "text", 
+          covariate.labels = covariate_labels,       # Etiquetas de variables
+          omit.stat = c("LL", "ser", "f"),           # Omite estadísticos innecesarios
+          no.space = TRUE, 
+          title = "Resultados del Modelo Logit", Mod_int)
